@@ -1,3 +1,4 @@
+override LINUXINCLUDE := -I$(src)/include $(LINUXINCLUDE)
 subdir-ccflags-y += -I$(src)/include
 
 ifeq ($(DEBUG),1)
