@@ -16,6 +16,9 @@ typedef irqreturn_t (*intr_callback_t)(int irq, void *data);
  * @get_version: get ARCSync IP version
  * @get_has_pmu: get ARCSync has_pmu flag
  * @get_arcnet_id: get the index of ARCSync IP unit
+ * @get_virt_mode: get virtualized interrupt mode flag
+ * @get_host_cluster_id: get host cluster/VP ID
+ * @build_coreid: pack cluster and core IDs into an ARCSync core ID
  * @clk_ctrl: core clock enable/disable control
  * @power_ctrl: send a power up/down signal to the specified core
  * @reset: send a reset signal to the specified core
@@ -33,6 +36,9 @@ struct arcsync_funcs {
 	int (*get_version)(struct device *dev);
 	int (*get_has_pmu)(struct device *dev);
 	int (*get_arcnet_id)(struct device *dev);
+	int (*get_virt_mode)(struct device *dev);
+	int (*get_host_cluster_id)(struct device *dev);
+	u32 (*build_coreid)(struct device *dev, u32 clid, u32 cid);
 	int (*clk_ctrl)(struct device *dev, u32 clid, u32 cid, u32 val);
 	int (*power_ctrl)(struct device *dev, u32 clid, u32 cid, u32 cmd);
 	int (*reset)(struct device *dev, u32 clid, u32 cid, u32 cmd);
