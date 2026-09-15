@@ -65,6 +65,22 @@ snps_accel_info_notify(struct snps_accel_app *accel_app, char __user *argp)
 }
 
 static int
+snps_accel_info_cluster(struct snps_accel_app *accel_app, char __user *argp)
+{
+	struct snps_accel_cluster_info data = { };
+
+	if (accel_app->virt_mode)
+		data.flags |= SNPS_ACCEL_CLUSTER_FLAG_VIRT;
+	data.host_cluster_id = accel_app->host_cluster_id;
+	data.target_cluster_id = accel_app->target_cluster_id;
+
+	if (copy_to_user((void __user *)argp, &data, sizeof(data)))
+		return -EFAULT;
+
+	return 0;
+}
+
+static int
 snps_accel_wait_irq(struct snps_accel_file_priv *fpriv, char __user *argp)
 {
 	struct snps_accel_app *accel_app = fpriv->app;
@@ -275,6 +291,9 @@ snps_accel_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case SNPS_ACCEL_IOCTL_DMABUF_DETACH:
 		err = snps_accel_do_dmabuf_detach(fpriv, argp);
 		break;
+	case SNPS_ACCEL_IOCTL_INFO_CLUSTER:
+		err = snps_accel_info_cluster(accel_app, argp);
+		break;
 	default:
 		err = -ENOTTY;
 		break;
@@ -352,6 +371,45 @@ snps_accel_get_ctrl_mem(struct device_node *node, struct resource *ctrl)
 		return ret;
 
 	return 0;
+}
+
+static struct device_node *
+snps_accel_of_get_main_rproc(struct device_node *node)
+{
+	struct device_node *rproc_np;
+
+	if (!of_find_property(node, "snps,main-rproc", NULL))
+		return NULL;
+
+	rproc_np = of_parse_phandle(node, "snps,main-rproc", 0);
+	if (!rproc_np)
+		return ERR_PTR(-EINVAL);
+
+	if (!of_device_is_compatible(rproc_np, "snps,npx-rproc") &&
+	    !of_device_is_compatible(rproc_np, "snps,vpx-rproc")) {
+		of_node_put(rproc_np);
+		return ERR_PTR(-EINVAL);
+	}
+
+	return rproc_np;
+}
+
+static u32 snps_accel_of_get_rproc_target_id(struct snps_accel_app *accel_app,
+					     struct device_node *rproc_np)
+{
+	u32 clid = 0;
+	u32 cid = 0;
+
+	if (!rproc_np)
+		return 0;
+
+	of_property_read_u32(rproc_np, "snps,arcsync-cluster-id", &clid);
+	if (accel_app->virt_mode)
+		return clid;
+
+	of_property_read_u32_index(rproc_np, "snps,arcsync-core-id", 0, &cid);
+
+	return accel_app->ctrl.fn.build_coreid(accel_app->ctrl.dev, clid, cid);
 }
 
 static void snps_accel_memdev_release(struct device *dev)
@@ -535,8 +593,11 @@ snps_accel_init_ctrl_with_arcsync_fn(struct snps_accel_app *accel_app, struct de
 
 	ctrl_fn->set_interrupt_callback = arcsync_fn->set_interrupt_callback;
 	ctrl_fn->remove_interrupt_callback = arcsync_fn->remove_interrupt_callback;
+	ctrl_fn->build_coreid = arcsync_fn->build_coreid;
 
 	accel_app->ctrl.arcnet_id = arcsync_fn->get_arcnet_id(arcsync_dev);
+	accel_app->virt_mode = arcsync_fn->get_virt_mode(arcsync_dev);
+	accel_app->host_cluster_id = arcsync_fn->get_host_cluster_id(arcsync_dev);
 
 	return 0;
 }
@@ -549,6 +610,7 @@ snps_accel_add_app(struct platform_device *pdev, struct device_node *node)
 	struct snps_accel_device *accel_dev = dev_get_drvdata(&pdev->dev);
 	struct resource ctrl;
 	struct resource shmem;
+	struct device_node *rproc_np;
 	u32 dma_bits = 32;
 	u32 pgprot_bits;
 
@@ -584,6 +646,16 @@ snps_accel_add_app(struct platform_device *pdev, struct device_node *node)
 		dev_err(&pdev->dev, "Failed to get ARCSync funcs\n");
 		goto err_get_arcsync_dev;
 	}
+
+	rproc_np = snps_accel_of_get_main_rproc(node);
+	if (IS_ERR(rproc_np)) {
+		dev_err(&pdev->dev, "Invalid snps,main-rproc property\n");
+		ret = PTR_ERR(rproc_np);
+		goto err_get_arcsync_dev;
+	}
+	accel_app->target_cluster_id =
+		snps_accel_of_get_rproc_target_id(accel_app, rproc_np);
+	of_node_put(rproc_np);
 
 	cdev_init(&accel_app->cdev, &snps_accel_app_fops);
 	accel_app->cdev.owner = THIS_MODULE;
@@ -637,6 +709,9 @@ snps_accel_add_app(struct platform_device *pdev, struct device_node *node)
 		accel_app->pgprot_bits = snps_accel_pgprot_writecombine;
 
 	dev_dbg(accel_app->device, "shmem pgprot 0x%x\n", accel_app->pgprot_bits);
+	dev_dbg(accel_app->device, "ARCSync %s host id %u target id %u\n",
+		accel_app->virt_mode ? "virt" : "physical",
+		accel_app->host_cluster_id, accel_app->target_cluster_id);
 
 	/*
 	 * The app devices are not proper OF platform devices. Apply the DMA
