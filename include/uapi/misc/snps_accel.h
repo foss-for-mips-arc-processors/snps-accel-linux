@@ -21,6 +21,7 @@ extern "C" {
 #define SNPS_ACCEL_DMABUF_INFO		0x05
 #define SNPS_ACCEL_DMABUF_IMPORT	0x06
 #define SNPS_ACCEL_DMABUF_DETACH	0x07
+#define SNPS_ACCEL_INFO_CLUSTER		0x08
 
 #define SNPS_ACCEL_IOCTL_INFO_SHMEM	\
 	_IOR(SNPS_ACCEL_MAGIC, SNPS_ACCEL_INFO_SHMEM, struct snps_accel_shmem)
@@ -36,6 +37,8 @@ extern "C" {
 	_IOW(SNPS_ACCEL_MAGIC, SNPS_ACCEL_DMABUF_IMPORT, struct snps_accel_dmabuf_import)
 #define SNPS_ACCEL_IOCTL_DMABUF_DETACH	\
 	_IOW(SNPS_ACCEL_MAGIC, SNPS_ACCEL_DMABUF_DETACH, struct snps_accel_dmabuf_detach)
+#define SNPS_ACCEL_IOCTL_INFO_CLUSTER	\
+	_IOR(SNPS_ACCEL_MAGIC, SNPS_ACCEL_INFO_CLUSTER, struct snps_accel_cluster_info)
 
 struct snps_accel_shmem {
 	/* Shared memory intermediate offset for use in mmap */
@@ -51,6 +54,19 @@ struct snps_accel_notify {
 
 	/* Size of mapped region */
 	__u64 size;
+};
+
+#define SNPS_ACCEL_CLUSTER_FLAG_VIRT	(1u << 0)
+
+struct snps_accel_cluster_info {
+	/* ARCSync mode flags */
+	__u32 flags;
+
+	/* Host cluster/VP ID */
+	__u32 host_cluster_id;
+
+	/* NPX/VPX target cluster/VP ID */
+	__u32 target_cluster_id;
 };
 
 struct snps_accel_wait_irq {

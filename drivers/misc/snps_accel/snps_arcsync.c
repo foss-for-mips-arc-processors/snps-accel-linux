@@ -251,6 +251,13 @@ static inline u32 arcsync_build_coreid(u32 clid, u32 cid, u32 width)
 	return (clid << width) | cid;
 }
 
+static u32 arcsync_build_coreid_fn(struct device *dev, u32 clid, u32 cid)
+{
+	struct arcsync_device *arcsync = dev_get_drvdata(dev);
+
+	return arcsync_build_coreid(clid, cid, arcsync->corenum_width);
+}
+
 /**
  * arcsync_version() - get ARCSync IP version
  * @dev: arcsync device handle
@@ -298,6 +305,32 @@ static int arcsync_arcnet_id(struct device *dev)
 	struct arcsync_device *arcsync = dev_get_drvdata(dev);
 
 	return arcsync->arcnet_id;
+}
+
+/**
+ * arcsync_virt_mode() - get virtualized interrupt mode flag
+ * @dev: arcsync device handle
+ *
+ * Return: 1 if the virtualized interrupt path is used, 0 otherwise
+ */
+static int arcsync_virt_mode(struct device *dev)
+{
+	struct arcsync_device *arcsync = dev_get_drvdata(dev);
+
+	return arcsync->virt_irq;
+}
+
+/**
+ * arcsync_host_cluster_id() - get host cluster ID
+ * @dev: arcsync device handle
+ *
+ * Return: host cluster/VP ID
+ */
+static int arcsync_host_cluster_id(struct device *dev)
+{
+	struct arcsync_device *arcsync = dev_get_drvdata(dev);
+
+	return arcsync->host_id;
 }
 
 /**
@@ -781,6 +814,9 @@ static const struct arcsync_funcs arcsync_ctrl = {
 	.get_version = arcsync_version,
 	.get_has_pmu = arcsync_has_pmu,
 	.get_arcnet_id = arcsync_arcnet_id,
+	.get_virt_mode = arcsync_virt_mode,
+	.get_host_cluster_id = arcsync_host_cluster_id,
+	.build_coreid = arcsync_build_coreid_fn,
 	.clk_ctrl = arcsync_clk_ctrl,
 	.power_ctrl = arcsync_power_ctrl,
 	.reset = arcsync_reset,

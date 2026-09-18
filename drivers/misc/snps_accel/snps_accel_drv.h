@@ -28,6 +28,7 @@ struct snps_accel_device {
 struct snps_accel_ctrl_fn {
 	int (*set_interrupt_callback)(struct device *dev, u32 irq, intr_callback_t cb, void *data);
 	int (*remove_interrupt_callback)(struct device *dev, u32 irq, void *data);
+	u32 (*build_coreid)(struct device *dev, u32 clid, u32 cid);
 };
 
 /**
@@ -57,6 +58,9 @@ struct snps_accel_app {
 	resource_size_t ctrl_size;
 	u32 pgprot_bits;
 	bool iommu_backed;
+	bool virt_mode;
+	u32 host_cluster_id;
+	u32 target_cluster_id;
 	u32 num_mem_regions;
 	struct snps_accel_mem_region mem_regions[SNPS_ACCEL_MAX_MEM_REGIONS];
 };
