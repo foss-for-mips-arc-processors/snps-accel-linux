@@ -379,7 +379,11 @@ snps_accel_of_get_main_rproc(struct device_node *node)
 {
 	struct device_node *rproc_np;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 	if (!of_property_present(node, "snps,main-rproc"))
+#else
+	if (!of_find_property(node, "snps,main-rproc", NULL))
+#endif
 		return NULL;
 
 	rproc_np = of_parse_phandle(node, "snps,main-rproc", 0);
