@@ -8,12 +8,12 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/iommu.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of_address.h>
 #include <linux/of_device.h>
-#include <linux/of_irq.h>
 #include <linux/of_reserved_mem.h>
 #if IS_ENABLED(CONFIG_OF_IOMMU)
 #include <linux/of_iommu.h>
@@ -591,8 +591,6 @@ snps_accel_init_ctrl_with_arcsync_fn(struct snps_accel_app *accel_app, struct de
 	if (IS_ERR(arcsync_fn))
 		return PTR_ERR(arcsync_fn);
 
-	ctrl_fn->set_interrupt_callback = arcsync_fn->set_interrupt_callback;
-	ctrl_fn->remove_interrupt_callback = arcsync_fn->remove_interrupt_callback;
 	ctrl_fn->build_coreid = arcsync_fn->build_coreid;
 
 	accel_app->ctrl.arcnet_id = arcsync_fn->get_arcnet_id(arcsync_dev);
@@ -734,21 +732,31 @@ snps_accel_add_app(struct platform_device *pdev, struct device_node *node)
 		goto err_app_dev_init;
 	}
 
-	/* Add interrupt callback for ARCSync interrupt */
-	accel_app->irq_num = of_irq_get(node, 0);
-	if (accel_app->irq_num >= 0) {
-		ret = accel_app->ctrl.fn.set_interrupt_callback(accel_app->ctrl.dev,
-					accel_app->irq_num,
-					snps_accel_app_irq_callback, accel_app);
-		if (!ret) {
-			init_waitqueue_head(&accel_app->wait);
-			dev_dbg(accel_app->device, "App IRQ: %d\n", accel_app->irq_num);
-		} else {
-			dev_warn(accel_app->device, "Not ARCSync IRQ %d\n", accel_app->irq_num);
-			accel_app->irq_num = -EINVAL;
-		}
-	} else {
+	accel_app->irq_num = arcsync_of_irq_get(accel_app->ctrl.dev, node, 0);
+
+	if (!device_link_add(&pdev->dev, accel_app->ctrl.dev,
+			     DL_FLAG_AUTOREMOVE_CONSUMER)) {
+		dev_err(accel_app->device, "Failed to link ARCSync device\n");
+		snps_accel_release_mem_regions(accel_app);
+		ret = -EINVAL;
+		goto err_app_dev_init;
+	}
+
+	if (accel_app->irq_num < 0) {
 		dev_warn(accel_app->device, "Notification IRQ not specified\n");
+	} else {
+		init_waitqueue_head(&accel_app->wait);
+		ret = request_irq(accel_app->irq_num, snps_accel_app_irq_callback,
+				  IRQF_SHARED, dev_name(accel_app->device),
+				  accel_app);
+		if (ret) {
+			dev_warn(accel_app->device, "Failed to request IRQ %d: %d\n",
+				 accel_app->irq_num, ret);
+			accel_app->irq_num = -EINVAL;
+			ret = 0;
+		} else {
+			dev_dbg(accel_app->device, "App IRQ: %d\n", accel_app->irq_num);
+		}
 	}
 
 	accel_app->ctrl_base = ctrl.start;
@@ -797,11 +805,8 @@ static int snps_accel_create_devs(struct platform_device *pdev)
 
 static void snps_accel_release_app(struct snps_accel_app *accel_app)
 {
-	const struct snps_accel_ctrl_fn *fn = &accel_app->ctrl.fn;
-
 	if (accel_app->irq_num >= 0)
-		fn->remove_interrupt_callback(accel_app->ctrl.dev,
-					      accel_app->irq_num, accel_app);
+		free_irq(accel_app->irq_num, accel_app);
 
 	snps_accel_release_mem_regions(accel_app);
 	device_destroy(snps_accel_class, accel_app->devt);

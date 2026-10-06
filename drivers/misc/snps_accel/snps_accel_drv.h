@@ -26,8 +26,6 @@ struct snps_accel_device {
  * struct snps_accel_ctrl_fn - ctrl unit driver functions needed by accelerator driver
  */
 struct snps_accel_ctrl_fn {
-	int (*set_interrupt_callback)(struct device *dev, u32 irq, intr_callback_t cb, void *data);
-	int (*remove_interrupt_callback)(struct device *dev, u32 irq, void *data);
 	u32 (*build_coreid)(struct device *dev, u32 clid, u32 cid);
 };
 
