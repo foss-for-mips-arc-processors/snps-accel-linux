@@ -7,9 +7,6 @@
 #define __SNPS_ARCSYNC_H__
 
 #include <linux/device.h>
-#include <linux/interrupt.h>
-
-typedef irqreturn_t (*intr_callback_t)(int irq, void *data);
 
 /**
  * struct arcsync_funcs - ARCSync control functions
@@ -29,8 +26,6 @@ typedef irqreturn_t (*intr_callback_t)(int irq, void *data);
  * @reset_cluster_group: reset the NPX L2 group or L1 slice group
  * @clk_ctrl_cluster_group: slice group clock enable/disable control
  * @power_ctrl_cluster_group: power up/down the NPX L2 group or L1 slice group
- * @set_interrupt_callback: set extra callback for ARCSync interrupt handler
- * @remove_interrupt_callback: remove extra callback for interrupt handler
  */
 struct arcsync_funcs {
 	int (*get_version)(struct device *dev);
@@ -49,8 +44,6 @@ struct arcsync_funcs {
 	int (*reset_cluster_group)(struct device *dev, u32 clid, u32 grp, u32 cmd);
 	int (*clk_ctrl_cluster_group)(struct device *dev, u32 clid, u32 grp, u32 cmd);
 	int (*power_ctrl_cluster_group)(struct device *dev, u32 clid, u32 grp, u32 cmd);
-	int (*set_interrupt_callback)(struct device *dev, u32 irq, intr_callback_t cb, void *data);
-	int (*remove_interrupt_callback)(struct device *dev, u32 irq, void *data);
 };
 
 /* valid cmd arg values of the reset and reset_cluster_group funcs*/
@@ -83,5 +76,8 @@ struct arcsync_funcs {
 struct device *arcsync_get_device_by_phandle(struct device_node *np,
 					     const char *phandle_name);
 const struct arcsync_funcs *arcsync_get_ctrl_fn(struct device *dev);
+
+int arcsync_of_irq_get(struct device *dev, struct device_node *np,
+		       unsigned int index);
 
 #endif /* __SNPS_ARCSYNC_H__ */
