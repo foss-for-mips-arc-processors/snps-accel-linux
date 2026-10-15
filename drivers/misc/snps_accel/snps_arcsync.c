@@ -9,15 +9,22 @@
  */
 
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/irq.h>
+#include <linux/irqchip/chained_irq.h>
+#include <linux/irqdomain.h>
 #include <linux/log2.h>
 #include <linux/module.h>
 #include <linux/of_address.h>
 #include <linux/of_device.h>
+#include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/snps_arcsync.h>
+#include <linux/version.h>
 
 #ifdef CONFIG_ISA_ARCV2
 #include <soc/arc/aux.h>
@@ -163,38 +170,24 @@
 struct arcsync_device;
 
 /**
- * struct arcsync_callback - element of callbacks list for each IRQ
- * @link - list of callbacks
- * @func - callback function registered by the external driver for this interrupt
- * @data - pointer with data for callback function
- */
-struct arcsync_callback {
-	struct list_head link;
-	intr_callback_t func;
-	void *data;
-};
-
-/**
  * struct arcsync_interrupt - describes each ARCSync interrupt
  * @arcsync - pointer to the arcsync device structure
- * @irqnum - described ARCSync interrupt number
+ * @parent_irq - IRQ number of the parent interrupt line
  * @idx - ARCSync interrupt line index and index in the array of interrupt structs (0,1,2...)
  * @vm_id - VM this interrupt belongs to (virtual IRQ mode only)
  * @vm_irq_idx - interrupt index within the VM (virtual IRQ mode only)
  * @ack_offs - precomputed EID ACK register offset
- * @callbacks_list_lock - spinlock for the list of IRQ callbacks
- * @callbacks_list - the list of IRQ callbacks
+ * @masked - software mask, set until a client unmasks the domain irq
  */
 struct arcsync_interrupt {
 	struct arcsync_device *arcsync;
-	u32 irqnum;
+	int parent_irq;
 	u32 idx;
 	u32 vm_id;
 	u32 vm_irq_idx;
 	u32 ack_offs;
 	char name[32];
-	spinlock_t callbacks_list_lock;
-	struct list_head callbacks_list;
+	bool masked;
 };
 
 /**
@@ -214,6 +207,7 @@ struct arcsync_interrupt {
  * @lock: lock for access to the ARCScyn MMIO
  * @num_irqs: number of ARCSync interrupts to handle
  * @irq: array of ARCsync host IRQs for notifications
+ * @domain: linear irqdomain, one virq per host line
  * @funcs: pointer to the structure with ARCSync control funcs
  */
 struct arcsync_device {
@@ -233,6 +227,7 @@ struct arcsync_device {
 	struct mutex lock;
 	u32 num_irqs;
 	struct arcsync_interrupt irq[ARCSYNC_HOST_MAX_IRQS];
+	struct irq_domain *domain;
 	const struct arcsync_funcs *funcs;
 };
 
@@ -721,95 +716,6 @@ arcsync_power_ctrl_cluster_group(struct device *dev, u32 clid, u32 grp, u32 cmd)
 	return 0;
 }
 
-static struct arcsync_interrupt *
-arcsync_get_interrupt(struct arcsync_device *arcsync, u32 irq)
-{
-	int i;
-
-	for (i = 0; i < arcsync->num_irqs; i++) {
-		if (arcsync->irq[i].irqnum == irq)
-			return &arcsync->irq[i];
-	}
-
-	return NULL;
-}
-
-/**
- * arcsync_set_interrupt_callback() - add callback for ARCSync interrupt handler
- * @dev: arcsync device handle
- * @irq: irq num
- * @func: callback function pointer
- * @data: data pointer
- *
- * Add callback to an interrupt callback list. If the external driver needs
- * some action for ARCSync IRQ in registers callback.
- *
- * Return: 0 on success or negative errno on failure.
- */
-static int
-arcsync_set_interrupt_callback(struct device *dev, u32 irq,
-			       intr_callback_t func, void *data)
-{
-	struct arcsync_callback *cb;
-	struct arcsync_interrupt *intr;
-	struct arcsync_device *arcsync = dev_get_drvdata(dev);
-
-	intr = arcsync_get_interrupt(arcsync, irq);
-	if (intr == NULL)
-		return -EINVAL;
-
-	cb = kmalloc(sizeof(struct arcsync_callback), GFP_KERNEL);
-	if (!cb)
-		return -ENOMEM;
-
-	cb->func = func;
-	cb->data = data;
-
-	spin_lock_irq(&intr->callbacks_list_lock);
-	list_add(&cb->link, &intr->callbacks_list);
-	spin_unlock_irq(&intr->callbacks_list_lock);
-
-	return 0;
-}
-
-/**
- * arcsync_remove_interrupt_callback() - remove interrupt handler callback
- * @dev: arcsync device handle
- * @irq: irq num
- * @data: data pointer
- *
- * Remove the callback from an interrupt callback list.
- *
- * Return: 0 on success or negative errno on failure.
- */
-static int
-arcsync_remove_interrupt_callback(struct device *dev, u32 irq,
-				  void *data)
-{
-	struct arcsync_interrupt *intr;
-	struct arcsync_callback *cb, *tmp;
-	struct arcsync_callback *remove_cb = NULL;
-	struct arcsync_device *arcsync = dev_get_drvdata(dev);
-
-	intr = arcsync_get_interrupt(arcsync, irq);
-	if (intr == NULL)
-		return -EINVAL;
-
-	spin_lock_irq(&intr->callbacks_list_lock);
-	list_for_each_entry_safe(cb, tmp, &intr->callbacks_list, link) {
-		if (cb->data == data) {
-			list_del(&cb->link);
-			remove_cb = cb;
-			break;
-		}
-	}
-	spin_unlock_irq(&intr->callbacks_list_lock);
-
-	kfree(remove_cb);
-
-	return 0;
-}
-
 static const struct arcsync_funcs arcsync_ctrl = {
 	.get_version = arcsync_version,
 	.get_has_pmu = arcsync_has_pmu,
@@ -827,8 +733,6 @@ static const struct arcsync_funcs arcsync_ctrl = {
 	.reset_cluster_group = arcsync_reset_cluster_group,
 	.clk_ctrl_cluster_group = arcsync_clk_ctrl_cluster_group,
 	.power_ctrl_cluster_group = arcsync_power_ctrl_cluster_group,
-	.set_interrupt_callback = arcsync_set_interrupt_callback,
-	.remove_interrupt_callback = arcsync_remove_interrupt_callback,
 };
 
 static int arcsync_get_clusters_num(struct arcsync_device *arcsync)
@@ -962,49 +866,187 @@ const struct arcsync_funcs *arcsync_get_ctrl_fn(struct device *dev)
 }
 EXPORT_SYMBOL(arcsync_get_ctrl_fn);
 
-/**
- * arcsync_interrupt - arcsync interrupt handler
- * @irq: IRQ number
- * @idata: Pointer to the arcsync interrupt structure
- */
-static irqreturn_t arcsync_interrupt(int irq, void *idata)
+static void arcsync_irq_mask(struct irq_data *data)
 {
-	struct arcsync_interrupt *irq_data = (struct arcsync_interrupt *)idata;
-	struct arcsync_device *arcsync = irq_data->arcsync;
-	struct arcsync_callback *cb;
-	u32 offs;
+	struct arcsync_interrupt *intr = irq_data_get_irq_chip_data(data);
+
+	WRITE_ONCE(intr->masked, true);
+}
+
+static void arcsync_irq_unmask(struct irq_data *data)
+{
+	struct arcsync_interrupt *intr = irq_data_get_irq_chip_data(data);
+
+	WRITE_ONCE(intr->masked, false);
+}
+
+static void arcsync_irq_print_chip(struct irq_data *data, struct seq_file *p)
+{
+	struct arcsync_interrupt *intr = irq_data_get_irq_chip_data(data);
+
+	if (intr && intr->name[0])
+		seq_printf(p, " %s", intr->name);
+	else
+		seq_puts(p, " arcsync-host-irq");
+}
+
+static const struct irq_chip arcsync_irq_chip = {
+	.name		= "snps-arcsync",
+	.irq_mask	= arcsync_irq_mask,
+	.irq_unmask	= arcsync_irq_unmask,
+	.irq_print_chip	= arcsync_irq_print_chip,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
+	.flags		= IRQCHIP_IMMUTABLE,
+#endif
+};
+
+static int arcsync_irq_map(struct irq_domain *domain, unsigned int virq,
+			   irq_hw_number_t hwirq)
+{
+	struct arcsync_device *arcsync = domain->host_data;
+	struct arcsync_interrupt *intr;
+
+	if (hwirq >= arcsync->num_irqs)
+		return -EINVAL;
+
+	intr = &arcsync->irq[hwirq];
+	irq_set_chip_and_handler(virq, &arcsync_irq_chip, handle_simple_irq);
+	irq_set_chip_data(virq, intr);
+	irq_set_status_flags(virq, IRQ_LEVEL);
+	irq_set_noprobe(virq);
+
+	return 0;
+}
+
+static void arcsync_irq_unmap(struct irq_domain *domain, unsigned int virq)
+{
+	irq_set_chip_and_handler(virq, NULL, NULL);
+	irq_set_chip_data(virq, NULL);
+}
+
+static const struct irq_domain_ops arcsync_domain_ops = {
+	.map = arcsync_irq_map,
+	.unmap = arcsync_irq_unmap,
+	.xlate = irq_domain_xlate_onecell,
+};
+
+static void arcsync_interrupt(struct irq_desc *desc)
+{
+	struct arcsync_interrupt *intr = irq_desc_get_handler_data(desc);
+	struct irq_chip *chip = irq_desc_get_chip(desc);
+	struct arcsync_device *arcsync = intr->arcsync;
 	u32 val;
 
-	if (irq != irq_data->irqnum) {
-		dev_dbg(arcsync->dev, "Received IRQ %d (idx %u), expected %u\n",
-			irq, irq_data->idx, irq_data->irqnum);
-		return IRQ_NONE;
+	chained_irq_enter(chip, desc);
+
+	val = readl(arcsync->regs + intr->ack_offs);
+	if (val) {
+		writel(arcsync->host_id, arcsync->regs + intr->ack_offs);
+		if (!READ_ONCE(intr->masked))
+			generic_handle_domain_irq(arcsync->domain, intr->idx);
 	}
 
-	offs = irq_data->ack_offs;
-	val = readl(arcsync->regs + offs);
-	if (!val)
-		return IRQ_HANDLED;
-
-	writel(arcsync->host_id, arcsync->regs + offs);
-
-	/* Use this interrupt as a doorbell for application drivers. We can't
-	 * determine what firmware app generated an IRQ,
-	 * call every callback, to unblock user space apps, they will figure
-	 * out what to do.
-	 * We don't share callbacks_list_lock between different interrupt
-	 * handlers, each handler has its own lock, so we can use a simple
-	 * spin_lock.
-	 */
-	spin_lock(&irq_data->callbacks_list_lock);
-	list_for_each_entry(cb, &irq_data->callbacks_list, link) {
-		if (cb && cb->func)
-			cb->func(irq, cb->data);
-	}
-	spin_unlock(&irq_data->callbacks_list_lock);
-
-	return IRQ_HANDLED;
+	chained_irq_exit(chip, desc);
 }
+
+static int arcsync_irq_setup(struct arcsync_device *arcsync)
+{
+	u32 i;
+
+	if (!arcsync->num_irqs)
+		return 0;
+
+	arcsync->domain = irq_domain_add_linear(arcsync->dev->of_node,
+						 arcsync->num_irqs,
+						 &arcsync_domain_ops, arcsync);
+	if (!arcsync->domain) {
+		dev_err(arcsync->dev, "Failed to create IRQ domain\n");
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < arcsync->num_irqs; i++) {
+		dev_dbg(arcsync->dev, "Chain parent IRQ %d hwirq %u (%s)\n",
+			arcsync->irq[i].parent_irq, i, arcsync->irq[i].name);
+		irq_set_chained_handler_and_data(arcsync->irq[i].parent_irq,
+						 arcsync_interrupt,
+						 &arcsync->irq[i]);
+	}
+
+	return 0;
+}
+
+static void arcsync_irq_teardown(struct arcsync_device *arcsync)
+{
+	u32 i;
+
+	if (!arcsync || !arcsync->domain)
+		return;
+
+	for (i = 0; i < arcsync->num_irqs; i++) {
+		irq_set_chained_handler_and_data(arcsync->irq[i].parent_irq,
+						 NULL, NULL);
+		synchronize_irq(arcsync->irq[i].parent_irq);
+	}
+
+	for (i = 0; i < arcsync->num_irqs; i++) {
+		unsigned int virq = irq_find_mapping(arcsync->domain, i);
+
+		if (virq)
+			irq_dispose_mapping(virq);
+	}
+	irq_domain_remove(arcsync->domain);
+	arcsync->domain = NULL;
+}
+
+/**
+ * arcsync_of_irq_get - resolve an ARCSync doorbell IRQ for a consumer node
+ * @dev: ARCSync device
+ * @np: consumer device node
+ * @index: interrupt index in @np
+ *
+ * The interrupt of @np may come from the ARCSync irqdomain (through
+ * interrupt-parent or interrupts-extended) or repeat the parent interrupt
+ * of an ARCSync host line.
+ *
+ * Return: IRQ number from the ARCSync irqdomain, or a negative errno.
+ */
+int arcsync_of_irq_get(struct device *dev, struct device_node *np,
+		       unsigned int index)
+{
+	struct arcsync_device *arcsync;
+	struct irq_data *data;
+	unsigned int virq;
+	int irq;
+	u32 i;
+
+	if (!dev || !np)
+		return -EINVAL;
+
+	arcsync = dev_get_drvdata(dev);
+	if (!arcsync || !arcsync->domain)
+		return -EINVAL;
+
+	irq = of_irq_get(np, index);
+	if (irq <= 0)
+		return irq ? irq : -EINVAL;
+
+	data = irq_get_irq_data(irq);
+	if (data && data->domain == arcsync->domain)
+		return irq;
+
+	for (i = 0; i < arcsync->num_irqs; i++) {
+		if (arcsync->irq[i].parent_irq != irq)
+			continue;
+
+		virq = irq_create_mapping(arcsync->domain, i);
+		if (!virq)
+			return -EINVAL;
+		return virq;
+	}
+
+	return -EINVAL;
+}
+EXPORT_SYMBOL(arcsync_of_irq_get);
 
 #ifdef CONFIG_ISA_ARCV2
 /* Read ARC host CPU cluster ID and core ID and build ARCSync core ID */
@@ -1081,13 +1123,12 @@ static int arcsync_probe(struct platform_device *pdev)
 			dev_err(&pdev->dev, "Could not get irq[%d]\n", i);
 			return ret;
 		}
-		arcsync->irq[i].irqnum = ret;
+		arcsync->irq[i].parent_irq = ret;
 		arcsync->irq[i].idx = i;
 		arcsync->irq[i].vm_id = i / irqs_per_vm;
 		arcsync->irq[i].vm_irq_idx = i % irqs_per_vm;
 		arcsync->irq[i].arcsync = arcsync;
-		spin_lock_init(&arcsync->irq[i].callbacks_list_lock);
-		INIT_LIST_HEAD(&arcsync->irq[i].callbacks_list);
+		arcsync->irq[i].masked = true;
 	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -1172,8 +1213,6 @@ static int arcsync_probe(struct platform_device *pdev)
 							arcsync->host_id,
 							arcsync->irq[i].idx);
 
-		dev_dbg(&pdev->dev, "Request IRQ: %d\n", arcsync->irq[i].irqnum);
-
 		of_property_read_string_index(node, "interrupt-names", i, &name);
 		if (name)
 			snprintf(arcsync->irq[i].name, sizeof(arcsync->irq[i].name),
@@ -1181,20 +1220,23 @@ static int arcsync_probe(struct platform_device *pdev)
 		else
 			snprintf(arcsync->irq[i].name, sizeof(arcsync->irq[i].name),
 				 "arcsync%d-irq%d", arcsync->arcnet_id, i);
-
-		ret = devm_request_irq(arcsync->dev, arcsync->irq[i].irqnum,
-				       arcsync_interrupt,
-				       0,
-				       arcsync->irq[i].name,
-				       &arcsync->irq[i]);
-		if (ret) {
-			dev_err(&pdev->dev, "Failed to set interrupt handler for %d IRQ\n",
-				arcsync->irq[i].irqnum);
-			return ret;
-		}
 	}
 
-	return ret;
+	return arcsync_irq_setup(arcsync);
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+static void arcsync_remove(struct platform_device *pdev)
+#else
+static int arcsync_remove(struct platform_device *pdev)
+#endif
+{
+	struct arcsync_device *arcsync = platform_get_drvdata(pdev);
+
+	arcsync_irq_teardown(arcsync);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
+	return 0;
+#endif
 }
 
 #ifdef CONFIG_OF
@@ -1216,6 +1258,7 @@ MODULE_DEVICE_TABLE(of, snps_arcsync_match);
 
 static struct platform_driver snps_arcsync_platform_driver = {
 	.probe = arcsync_probe,
+	.remove = arcsync_remove,
 	.driver = {
 		.name = "arcsync",
 		.of_match_table = of_match_ptr(snps_arcsync_match),
