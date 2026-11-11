@@ -208,44 +208,14 @@ snps_accel_do_dmabuf_detach(struct snps_accel_file_priv *fpriv, char __user *arg
 	return 0;
 }
 
-/*
- * The ranges are copied in chunks on the stack, so a call allocates nothing.
- * They are synced in order; on the first error, failed is the index of the
- * failing range and the ranges before it were synced.
- */
-static int snps_accel_do_dmabuf_sync_ranges(char __user *argp)
+static int snps_accel_do_dmabuf_sync_range(char __user *argp)
 {
-	struct snps_accel_sync_ranges data;
-	struct snps_accel_sync_range chunk[16];
-	struct snps_accel_sync_range __user *ranges;
-	u32 i = 0, k, n;
-	int ret = 0;
+	struct snps_accel_sync_range range;
 
-	if (copy_from_user(&data, (void __user *)argp, sizeof(data)))
-		return -EFAULT;
-	if (data.count > SNPS_ACCEL_SYNC_RANGES_MAX)
-		return -EINVAL;
-	ranges = u64_to_user_ptr(data.ranges);
-
-	while (i < data.count && !ret) {
-		n = min_t(u32, data.count - i, ARRAY_SIZE(chunk));
-		if (copy_from_user(chunk, ranges + i, n * sizeof(chunk[0]))) {
-			ret = -EFAULT;
-			break;
-		}
-		for (k = 0; k < n; k++, i++) {
-			ret = snps_accel_app_dmabuf_sync_range(&chunk[k]);
-			if (ret)
-				break;
-		}
-	}
-
-	data.failed = i;
-	if (copy_to_user(argp + offsetof(struct snps_accel_sync_ranges, failed),
-			 &data.failed, sizeof(data.failed)))
+	if (copy_from_user(&range, (void __user *)argp, sizeof(range)))
 		return -EFAULT;
 
-	return ret;
+	return snps_accel_app_dmabuf_sync_range(&range);
 }
 
 static void file_priv_release(struct kref *ref)
@@ -335,8 +305,8 @@ snps_accel_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case SNPS_ACCEL_IOCTL_INFO_CLUSTER:
 		err = snps_accel_info_cluster(accel_app, argp);
 		break;
-	case SNPS_ACCEL_IOCTL_DMABUF_SYNC_RANGES:
-		err = snps_accel_do_dmabuf_sync_ranges(argp);
+	case SNPS_ACCEL_IOCTL_DMABUF_SYNC_RANGE:
+		err = snps_accel_do_dmabuf_sync_range(argp);
 		break;
 	default:
 		err = -ENOTTY;
