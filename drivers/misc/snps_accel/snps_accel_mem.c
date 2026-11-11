@@ -5,6 +5,7 @@
 
 #include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
+#include <linux/overflow.h>
 #include <linux/slab.h>
 
 #include <uapi/misc/snps_accel.h>
@@ -455,6 +456,70 @@ int snps_accel_app_dmabuf_info(struct snps_accel_mem_ctx *mem,
 	if (ret)
 		dev_err(mem->dev, "Failed to find dmabuf with fd %d\n", info->fd);
 
+	dma_buf_put(dmabuf);
+	return ret;
+}
+
+/*
+ * Cache maintenance of one byte range of a dma-buf this driver exported, from
+ * any process holding its fd (see struct snps_accel_sync_range). The
+ * direction comes from the call, not from the buffer's allocation flags, as
+ * for begin_cpu_access / end_cpu_access: what matters is who wrote last.
+ */
+int snps_accel_app_dmabuf_sync_range(const struct snps_accel_sync_range *r)
+{
+	const u32 valid = SNPS_ACCEL_SYNC_TO_DEVICE | SNPS_ACCEL_SYNC_TO_CPU;
+	struct snps_accel_mem_buffer *mbuf;
+	struct snps_accel_dmabuf_attachment *dba;
+	struct dma_buf *dmabuf;
+	bool attached = false;
+	u64 end;
+	int ret = 0;
+
+	if (!r->flags || (r->flags & ~valid))
+		return -EINVAL;
+
+	/* holds a reference to the file, so the buffer stays alive */
+	dmabuf = dma_buf_get(r->fd);
+	if (IS_ERR(dmabuf))
+		return -EBADF;
+
+	/* only buffers this driver exported; an imported one belongs to its exporter */
+	if (dmabuf->ops != &snps_accel_dmabuf_ops) {
+		ret = -EINVAL;
+		goto out;
+	}
+	mbuf = dmabuf->priv;
+
+	if (check_add_overflow(r->offset, r->length, &end) || end > mbuf->size) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (!r->length)
+		goto out;
+
+	/*
+	 * A buffer mapped by an importing device: its own mappings would need
+	 * the same range; not handled, the caller syncs the whole buffer
+	 * through DMA_BUF_IOCTL_SYNC instead.
+	 */
+	mutex_lock(&mbuf->lock);
+	list_for_each_entry(dba, &mbuf->attachments, node)
+		attached = attached || dba->mapped;
+	mutex_unlock(&mbuf->lock);
+	if (attached) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	/* clean first, then invalidate; both end with a DSB */
+	if (r->flags & SNPS_ACCEL_SYNC_TO_DEVICE)
+		dma_sync_single_range_for_device(mbuf->dev, mbuf->da, r->offset,
+						 r->length, DMA_TO_DEVICE);
+	if (r->flags & SNPS_ACCEL_SYNC_TO_CPU)
+		dma_sync_single_range_for_cpu(mbuf->dev, mbuf->da, r->offset,
+					      r->length, DMA_FROM_DEVICE);
+out:
 	dma_buf_put(dmabuf);
 	return ret;
 }

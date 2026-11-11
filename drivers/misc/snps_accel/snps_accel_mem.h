@@ -10,6 +10,7 @@
 #include <linux/dma-buf.h>
 
 struct snps_accel_app_mm;
+struct snps_accel_sync_range;
 
 #define SNPS_ACCEL_MAX_MEM_REGIONS 16
 
@@ -78,5 +79,6 @@ void snps_accel_app_dmabuf_release(struct snps_accel_mem_buffer *mbuf);
 int snps_accel_app_dmabuf_info(struct snps_accel_mem_ctx *mem, struct snps_accel_dmabuf_info *info);
 int snps_accel_app_dmabuf_import(struct snps_accel_mem_ctx *mem, int fd);
 int snps_accel_app_dmabuf_detach(struct snps_accel_mem_ctx *mem, int fd);
+int snps_accel_app_dmabuf_sync_range(const struct snps_accel_sync_range *r);
 
 #endif  /* _SNPS_ACCEL_MEM_H */

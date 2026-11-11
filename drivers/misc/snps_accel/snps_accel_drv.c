@@ -208,6 +208,16 @@ snps_accel_do_dmabuf_detach(struct snps_accel_file_priv *fpriv, char __user *arg
 	return 0;
 }
 
+static int snps_accel_do_dmabuf_sync_range(char __user *argp)
+{
+	struct snps_accel_sync_range range;
+
+	if (copy_from_user(&range, (void __user *)argp, sizeof(range)))
+		return -EFAULT;
+
+	return snps_accel_app_dmabuf_sync_range(&range);
+}
+
 static void file_priv_release(struct kref *ref)
 {
 	struct snps_accel_file_priv *fpriv = container_of(ref, struct snps_accel_file_priv, ref);
@@ -294,6 +304,9 @@ snps_accel_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		break;
 	case SNPS_ACCEL_IOCTL_INFO_CLUSTER:
 		err = snps_accel_info_cluster(accel_app, argp);
+		break;
+	case SNPS_ACCEL_IOCTL_DMABUF_SYNC_RANGE:
+		err = snps_accel_do_dmabuf_sync_range(argp);
 		break;
 	default:
 		err = -ENOTTY;
