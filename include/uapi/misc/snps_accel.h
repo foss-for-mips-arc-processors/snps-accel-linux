@@ -22,6 +22,7 @@ extern "C" {
 #define SNPS_ACCEL_DMABUF_IMPORT	0x06
 #define SNPS_ACCEL_DMABUF_DETACH	0x07
 #define SNPS_ACCEL_INFO_CLUSTER		0x08
+#define SNPS_ACCEL_DMABUF_SYNC_RANGES	0x09
 
 #define SNPS_ACCEL_IOCTL_INFO_SHMEM	\
 	_IOR(SNPS_ACCEL_MAGIC, SNPS_ACCEL_INFO_SHMEM, struct snps_accel_shmem)
@@ -39,6 +40,8 @@ extern "C" {
 	_IOW(SNPS_ACCEL_MAGIC, SNPS_ACCEL_DMABUF_DETACH, struct snps_accel_dmabuf_detach)
 #define SNPS_ACCEL_IOCTL_INFO_CLUSTER	\
 	_IOR(SNPS_ACCEL_MAGIC, SNPS_ACCEL_INFO_CLUSTER, struct snps_accel_cluster_info)
+#define SNPS_ACCEL_IOCTL_DMABUF_SYNC_RANGES	\
+	_IOWR(SNPS_ACCEL_MAGIC, SNPS_ACCEL_DMABUF_SYNC_RANGES, struct snps_accel_sync_ranges)
 
 struct snps_accel_shmem {
 	/* Shared memory intermediate offset for use in mmap */
@@ -111,6 +114,54 @@ struct snps_accel_dmabuf_import {
 struct snps_accel_dmabuf_detach {
 	/* dma-buf file descriptor */
 	__s32 fd;
+};
+
+/*
+ * Cache maintenance of byte ranges of dma-bufs exported by this driver, for
+ * a CPU mapping that is cacheable while the device does not snoop CPU caches.
+ *
+ * TO_DEVICE: the CPU wrote the range and the device will read it; writes
+ * dirty cache lines back (clean). Also issue it before the device writes a
+ * range the CPU has written to, so no dirty line is written back over the
+ * device's data later.
+ * TO_CPU: the device wrote the range and the CPU will read it; drops the
+ * range's cache lines (invalidate), after the device has finished.
+ * Both: clean, then invalidate.
+ *
+ * The maintenance is by cache line: a line partly inside the range is
+ * cleaned and invalidated as a whole, so bytes of it outside the range must
+ * not be written by the CPU and the device at the same time.
+ */
+#define SNPS_ACCEL_SYNC_TO_DEVICE	(1u << 0)
+#define SNPS_ACCEL_SYNC_TO_CPU		(1u << 1)
+
+struct snps_accel_sync_range {
+	/* dma-buf file descriptor of a buffer exported by this driver */
+	__s32 fd;
+
+	/* SNPS_ACCEL_SYNC_TO_DEVICE, SNPS_ACCEL_SYNC_TO_CPU or both */
+	__u32 flags;
+
+	/* Byte range inside the buffer */
+	__u64 offset;
+	__u64 length;
+};
+
+/* Ranges per call; count = 0 checks the driver supports the call */
+#define SNPS_ACCEL_SYNC_RANGES_MAX	64
+
+struct snps_accel_sync_ranges {
+	/* User pointer to an array of count struct snps_accel_sync_range */
+	__u64 ranges;
+
+	/* Number of ranges, 0 to SNPS_ACCEL_SYNC_RANGES_MAX */
+	__u32 count;
+
+	/*
+	 * Returned by the driver: count on success, else the index of the
+	 * range that failed; the ranges before it were synced
+	 */
+	__u32 failed;
 };
 
 #if defined(__cplusplus)
